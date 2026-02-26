@@ -1,29 +1,20 @@
 """
-Split a multi-panel TIF into individual panels (5 rows × 6 cols).
+Split a multi-panel TIF into individual panels based on user-defined grid.
 """
 
 import numpy as np
 import tifffile
 from pathlib import Path
 
-
-def split_panels(filepath, rows=5, cols=6, output_dir=None):
+def split_panels(filepath, rows, cols, output_dir=None):
     """
     Split a TIF image into a grid of panels and save each one.
-    
-    Parameters
-    ----------
-    filepath : str
-        Path to the TIF file.
-    rows, cols : int
-        Grid layout (default: 5×6 = 30 panels).
-    output_dir : str, optional
-        Where to save. Defaults to a folder next to the input file.
     """
     filepath = Path(filepath)
     img = tifffile.imread(str(filepath))
     
-    h, w = img.shape[0], img.shape[1]
+    # Get dimensions
+    h, w = img.shape[:2]  # Handles both grayscale and multi-channel
     ph = h // rows
     pw = w // cols
     
@@ -32,25 +23,39 @@ def split_panels(filepath, rows=5, cols=6, output_dir=None):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"Image: {img.shape} → {rows}×{cols} grid, panel size {ph}×{pw}")
+    print(f"\nProcessing: {filepath.name}")
+    print(f"Image Size: {w}x{h} px")
+    print(f"Grid: {rows} rows × {cols} columns")
+    print(f"Panel Size: {pw}x{ph} px")
     
-    panels = []
+    count = 0
     for r in range(rows):
         for c in range(cols):
-            idx = r * cols + c
-            panel = img[r*ph:(r+1)*ph, c*pw:(c+1)*pw]
-            panels.append(panel)
+            # Slicing the numpy array for the specific panel
+            panel = img[r*ph : (r+1)*ph, c*pw : (c+1)*pw]
             
-            out_path = output_dir / f"{filepath.stem}_panel{idx:02d}.tif"
+            # Using row/col indices in filename often makes it easier to find specific spots
+            out_path = output_dir / f"{filepath.stem}_R{r+1}_C{c+1}.tif"
             tifffile.imwrite(str(out_path), panel)
+            count += 1
     
-    print(f"Saved {len(panels)} panels to {output_dir}")
-    return panels
-
+    print(f"Successfully saved {count} panels to: {output_dir}")
 
 if __name__ == "__main__":
     import sys
+    
+    # Check if a filename was provided as an argument
     if len(sys.argv) > 1:
-        split_panels(sys.argv[1])
+        target_file = sys.argv[1]
+        
+        try:
+            # User Inputs
+            num_rows = int(input("Enter number of rows: "))
+            num_cols = int(input("Enter number of columns: "))
+            
+            split_panels(target_file, num_rows, num_cols)
+            
+        except ValueError:
+            print("Error: Please enter whole numbers for rows and columns.")
     else:
         print("Usage: python panel_splitter.py image.tif")

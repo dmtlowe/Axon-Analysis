@@ -7,8 +7,8 @@ import tifffile
 import roifile
 
 # ── USER DEFINED PATHS ────────────────────────────────────────────────────────
-IMAGE_PATH = r"Z:\Uni\PhD\Projects\Axon Analysis\Images\24-08-12_OreR_e3DIV_W_2-36_8bit_panel.tif"
-ROI_FOLDER = r"Z:\Uni\PhD\Projects\Axon Analysis\ROIs\24-08-12_OreR_e3DIV_W_2-36_ROI"
+IMAGE_PATH = r"C:\Uni\Projects\Axon_Analysis\data\PAVNCD1_1-5-_8bit_panel.tif"
+ROI_FOLDER = r"C:\Uni\Projects\Axon_Analysis\data\PAVNCD1_1-5-_ROI"
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_image(path):

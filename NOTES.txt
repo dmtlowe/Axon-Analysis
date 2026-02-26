@@ -1,0 +1,22 @@
+neuron_trace.py 
+2 filters: 
+hard cap at 100,000 pixels - anything under is removed - need to test on more examples to fine tune this threshold 
+Filtering based on geodesic distance of tubulin from DAPI stain. 
+- Furthest point of tubulin needs to be 4x the radius of the nucleus - again works so far but need to test on more examples. 
+- also need to remove the shit skeleton tool 
+
+measure_axon.py
+Need to test the axon measurment tool - works thus far but I fear it may break in extreme cases of microtubule disorganisation 
+Perhaps have a system to fall back on - taking the medial geodesic for extreme cases ??
+
+nucleus_detector.py 
+Only one example where this fails. Mistaking multi 
+
+TO DO 
+- not cry 
+- touch grass
+THEN 
+- Produce batch version and pass over all exisiting datasets and evaluate performance - measure against human labels and plot differences for PAVNCD1_1-5-_8bit_panel
+
+HOW TF AM I GONNA DO MDI QUANTIFICATION ?!?!?!!!?!!?!?!? 
+git status 
