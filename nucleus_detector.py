@@ -14,18 +14,14 @@ import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 from skimage import io, morphology, measure, filters
-from scipy import ndimage
-from skimage.feature import peak_local_max
-from skimage.segmentation import watershed
 from pathlib import Path
 
 
-def detect_nuclei(img, min_size=100, blur_sigma=5, min_peak_distance=50,
+def detect_nuclei(img, min_size=100, blur_sigma=10,
                   require_hrp=True, hrp_channel=1, hrp_ring_width=30,
-                  hrp_threshold_factor=6.0):
+                  hrp_threshold_factor=2.0):
     """
-    Detect nuclei from the blue channel, optionally filtered by
-    HRP (green channel) colocalisation.
+    Detect nuclei from the blue channel of an RGB image.
     
     Parameters
     ----------
@@ -35,17 +31,18 @@ def detect_nuclei(img, min_size=100, blur_sigma=5, min_peak_distance=50,
         Minimum nucleus area in pixels.
     blur_sigma : float
         Gaussian blur sigma for DAPI channel.
-    min_peak_distance : int
-        Minimum distance between watershed seeds.
+    close_radius : int
+        Morphological closing disk radius. Merges nearby DAPI
+        fragments into single nuclei. Increase if nuclei are
+        still being split.
     require_hrp : bool
         If True, only keep nuclei with green signal nearby.
     hrp_channel : int
         Which channel has HRP (default 1 = green).
     hrp_ring_width : int
-        Width of ring around nucleus to check for HRP signal (pixels).
+        Half-width of patch around centroid to check for HRP.
     hrp_threshold_factor : float
-        Nucleus is kept if mean green in ring > factor × image background.
-        Background is estimated as median of the green channel.
+        Keep nucleus if mean green in patch > factor × median green.
     
     Returns
     -------
@@ -65,13 +62,8 @@ def detect_nuclei(img, min_size=100, blur_sigma=5, min_peak_distance=50,
     mask = morphology.remove_small_objects(mask, min_size=min_size)
     mask = morphology.remove_small_holes(mask, area_threshold=500)
     
-    # Watershed
-    distance = ndimage.distance_transform_edt(mask)
-    coords = peak_local_max(distance, min_distance=min_peak_distance, labels=mask)
-    peak_mask = np.zeros(distance.shape, dtype=bool)
-    peak_mask[tuple(coords.T)] = True
-    markers = measure.label(peak_mask)
-    labeled = watershed(-distance, markers, mask=mask)
+    # Simple connected components
+    labeled = measure.label(mask)
     
     # Green channel for HRP check
     if require_hrp:
@@ -91,7 +83,6 @@ def detect_nuclei(img, min_size=100, blur_sigma=5, min_peak_distance=50,
         cy, cx = int(region.centroid[0]), int(region.centroid[1])
         
         if require_hrp:
-            # Check green intensity in a patch around centroid
             h, w = green.shape
             y0 = max(0, cy - hrp_ring_width)
             y1 = min(h, cy + hrp_ring_width)

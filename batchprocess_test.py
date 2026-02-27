@@ -9,7 +9,7 @@ from measure_axon import measure_axon, show_axon
 # Test script for batch processing multiple images in a directory 
 
 img_folder_path = r"C:\Uni\Projects\Axon_Analysis\data\PAVNCD1_1-5-_8bit_panel_panels"
-save_folder_path = r"C:\Uni\Projects\Axon_Analysis\data\results\PAVNCD1_1-5-_8bit_panel"
+save_folder_path = r"C:\Uni\Projects\Axon_Analysis\data\results\filter_with_border"
 
 
 os.makedirs(save_folder_path, exist_ok=True)
@@ -31,7 +31,10 @@ for file_idx, filename in enumerate(files, start=1):
         img, centroids, labeled,
         channel=0,
         threshold_pct=0.10,
-        min_reach_ratio=4.0
+        min_reach_ratio=6.0,
+        border_margin=350,
+        min_mask_size=90000,
+        verbose=False          # suppress per-neuron prints
     )
 
     for neuron_idx in range(len(traces)):
@@ -56,7 +59,8 @@ for file_idx, filename in enumerate(files, start=1):
             img,
             result,
             nucleus_mask=nuc_mask,
-            save_path=os.path.join(save_folder_path, save_name)
+            save_path=os.path.join(save_folder_path, save_name),
+            show = False
         )
 
         rows.append({

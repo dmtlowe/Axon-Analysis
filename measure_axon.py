@@ -52,12 +52,21 @@ def geodesic_distance(mask, seed):
     return dist
 
 
-def find_start_point(nucleus_mask, neuron_mask, target):
+def find_start_point(nucleus_mask, neuron_mask, tip, distance_map):
     """
-    Find the best starting point on the nucleus boundary.
+    Find where the axon meets the nucleus boundary.
     
-    Picks the nucleus boundary pixel that is inside the neuron mask
-    and closest (Euclidean) to the target (axon tip).
+    Uses the geodesic distance map (from the centroid) to find the
+    nucleus boundary pixel with the highest geodesic distance that
+    is still connected to the neuron mask. This is where the axon
+    actually leaves the soma, not just the nearest point to the tip.
+    
+    Parameters
+    ----------
+    nucleus_mask : 2D bool array
+    neuron_mask : 2D bool array
+    tip : tuple (y, x), the axon tip
+    distance_map : 2D float array, geodesic distance from centroid
     """
     from skimage.segmentation import find_boundaries
     boundary = find_boundaries(nucleus_mask, mode='outer')
@@ -66,20 +75,31 @@ def find_start_point(nucleus_mask, neuron_mask, target):
     candidates = boundary & neuron_mask
     
     if not candidates.any():
-        # Fallback: any boundary pixel
         candidates = boundary
     
     if not candidates.any():
-        # No boundary at all — use centroid
         ys, xs = np.where(nucleus_mask)
         return (int(ys.mean()), int(xs.mean()))
     
+    # Pick the boundary pixel on the path toward the tip:
+    # highest geodesic distance from centroid = furthest along the neuron
+    # but still on the nucleus edge
     ys, xs = np.where(candidates)
-    ty, tx = target
-    dists = (ys - ty)**2 + (xs - tx)**2
-    best = np.argmin(dists)
+    geo_dists = distance_map[ys, xs]
     
-    return (ys[best], xs[best])
+    # Filter out inf values
+    valid = np.isfinite(geo_dists)
+    if not valid.any():
+        # Fallback to Euclidean closest to tip
+        ty, tx = tip
+        dists = (ys - ty)**2 + (xs - tx)**2
+        best = np.argmin(dists)
+        return (ys[best], xs[best])
+    
+    best = np.argmax(geo_dists[valid])
+    valid_ys = ys[valid]
+    valid_xs = xs[valid]
+    return (valid_ys[best], valid_xs[best])
 
 
 def trace_intensity_path(gray, start, end, neuron_mask, intensity_weight=2.0):
@@ -179,13 +199,14 @@ def trace_intensity_path(gray, start, end, neuron_mask, intensity_weight=2.0):
 
 
 def measure_axon(img, neuron_mask, nucleus_centroid, nucleus_mask, 
-                 channel=0, intensity_weight=2.0):
+                 channel=0, intensity_weight=2.0, nucleus_snap_distance=30):
     """
     Full axon measurement pipeline.
     
     1. Find furthest point (geodesic) = axon tip
-    2. Find start point on nucleus boundary
-    3. Trace intensity-guided path from start to tip
+    2. Trace intensity-guided path from tip toward the nucleus
+    3. Path stops when it gets within nucleus_snap_distance (geodesic)
+       of the nucleus mask
     
     Parameters
     ----------
@@ -195,6 +216,9 @@ def measure_axon(img, neuron_mask, nucleus_centroid, nucleus_mask,
     nucleus_mask : 2D bool array
     channel : int, which channel has tubulin (default 0 = red)
     intensity_weight : float, how strongly path follows bright signal
+    nucleus_snap_distance : int
+        When the path gets within this many geodesic pixels of the
+        nucleus mask, it stops. Prevents path from looping around soma.
     
     Returns
     -------
@@ -209,16 +233,35 @@ def measure_axon(img, neuron_mask, nucleus_centroid, nucleus_mask,
     tip_idx = np.argmax(reachable)
     tip = np.unravel_index(tip_idx, geo.shape)
     
-    # Step 2: find start on nucleus boundary facing the tip
-    start = find_start_point(nucleus_mask, neuron_mask, tip)
+    # Step 2: compute geodesic distance from nucleus mask boundary
+    # (so we know how far each pixel is from the nucleus)
+    nuc_geo = geodesic_distance(neuron_mask, nucleus_centroid)
     
-    # Step 3: trace intensity path from start to tip
-    path, length_px = trace_intensity_path(
-        gray, start, tip, neuron_mask, intensity_weight
+    # Step 3: trace intensity path from tip toward nucleus centroid
+    path, _ = trace_intensity_path(
+        gray, tip, nucleus_centroid, neuron_mask, intensity_weight
     )
     
+    # Step 4: trim path — stop when within snap distance of nucleus
+    trimmed_path = []
+    for point in path:
+        trimmed_path.append(point)
+        if nuc_geo[point[0], point[1]] <= nucleus_snap_distance:
+            break
+        if nucleus_mask[point[0], point[1]]:
+            break
+    
+    # Calculate length of trimmed path
+    length_px = 0.0
+    for i in range(1, len(trimmed_path)):
+        dy = trimmed_path[i][0] - trimmed_path[i-1][0]
+        dx = trimmed_path[i][1] - trimmed_path[i-1][1]
+        length_px += np.sqrt(dy**2 + dx**2)
+    
+    start = trimmed_path[-1] if trimmed_path else nucleus_centroid
+    
     return {
-        "path": path,
+        "path": trimmed_path,
         "length_px": length_px,
         "start_point": start,
         "tip_point": tip,
@@ -252,43 +295,33 @@ def measure_all_axons(img, traces, centroids, nuclei_labeled,
     return results
 
 
-def show_axon(img, axon_result, nucleus_mask=None, save_path=None):
+def show_axon(img, axon_result, nucleus_mask=None, save_path=None, show=True):
     """
     Visualise the measured axon path.
     """
     path = axon_result["path"]
-    distance_map = axon_result["distance_map"]
     start = axon_result["start_point"]
     tip = axon_result["tip_point"]
     
     path_arr = np.array(path)
     
-    fig, axes = plt.subplots(1, 2, figsize=(14, 7))
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
     
-    # Path on original
-    axes[0].imshow(img)
-    axes[0].plot(path_arr[:, 1], path_arr[:, 0], 'lime', linewidth=1.5, label='Axon')
-    axes[0].plot(tip[1], tip[0], 'r+', markersize=15, markeredgewidth=2, label='Tip')
-    axes[0].plot(start[1], start[0], 'c+', markersize=15, markeredgewidth=2, label='Start')
+    ax.imshow(img)
+    ax.plot(path_arr[:, 1], path_arr[:, 0], 'lime', linewidth=1.5, label='Axon')
+    ax.plot(tip[1], tip[0], 'r+', markersize=15, markeredgewidth=2, label='Tip')
+    ax.plot(start[1], start[0], 'c+', markersize=15, markeredgewidth=2, label='Start')
     if nucleus_mask is not None:
-        axes[0].contour(nucleus_mask, colors='cyan', linewidths=0.8)
-    axes[0].legend(fontsize=9)
-    axes[0].set_title(f"Axon: {axon_result['length_px']:.1f} px")
-    axes[0].axis("off")
-    
-    # Path on tubulin channel
-    gray = img[:, :, 0].astype(np.float64)
-    axes[1].imshow(gray, cmap="gray")
-    axes[1].plot(path_arr[:, 1], path_arr[:, 0], 'lime', linewidth=1.5)
-    axes[1].plot(tip[1], tip[0], 'r+', markersize=15, markeredgewidth=2)
-    axes[1].plot(start[1], start[0], 'c+', markersize=15, markeredgewidth=2)
-    if nucleus_mask is not None:
-        axes[1].contour(nucleus_mask, colors='cyan', linewidths=0.8)
-    axes[1].set_title(f"Path on tubulin channel")
-    axes[1].axis("off")
+        ax.contour(nucleus_mask, colors='cyan', linewidths=0.8)
+    ax.legend(fontsize=9)
+    ax.set_title(f"Axon: {axon_result['length_px']:.1f} px")
+    ax.axis("off")
     
     plt.tight_layout()
     if save_path:
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
         print(f"Saved: {save_path}")
-    plt.show()
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)

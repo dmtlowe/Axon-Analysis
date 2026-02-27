@@ -3,7 +3,7 @@ from nucleus_detector import detect_nuclei
 from neuron_trace import trace_all_neurons, show_traces
 from measure_axon import measure_axon, show_axon
 
-img_path = r"C:\Uni\Projects\Axon_Analysis\data\PAVNCD1_1-5-_8bit_panel_panels\PAVNCD1_1-5-_8bit_panel_R3_C5.tif"
+img_path = r"C:\Uni\Projects\Axon_Analysis\data\PAVNCD1_1-5-_8bit_panel_panels\PAVNCD1_1-5-_8bit_panel_R2_C2.tif"
 
 img = io.imread(img_path)
 centroids, labeled = detect_nuclei(img)
@@ -13,7 +13,9 @@ traces, kept_centroids = trace_all_neurons(
     img, centroids, labeled, 
     channel=0, 
     threshold_pct=0.10,
-    min_reach_ratio=6.0   # tubulin must extend 4× nucleus radius
+    min_reach_ratio=6.0,   # tubulin must extend 4× nucleus radius
+    border_margin=350      # exclude neurons near the border (use border_test.py to determine ideal margin)
+
 )
 
 

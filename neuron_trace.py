@@ -2,9 +2,8 @@
 Neuron tracer - region grow from seed points, skeletonize, filter non-neurons.
 
 Functions:
-    trace_neuron(img, seed, channel=0, threshold_pct=0.10)
-    trace_all_neurons(img, centroids, nuclei_labeled, channel=0, 
-                      threshold_pct=0.10, min_reach_ratio=2.0)
+    trace_neuron(img, seed, channel=0, threshold_pct=0.10, min_absolute=10)
+    trace_all_neurons(img, centroids, nuclei_labeled, ...)
     show_traces(img, traces, nuclei_labeled=None)
 """
 
@@ -14,11 +13,19 @@ from skimage import morphology, measure
 from collections import deque
 
 
-def region_grow(img_gray, seed, threshold_pct=0.10):
-    """Grow mask from seed point based on intensity threshold."""
+def region_grow(img_gray, seed, threshold_pct=0.10, min_absolute=10):
+    """
+    Grow mask from seed point based on intensity threshold.
+    
+    Uses the HIGHER of:
+    - threshold_pct × seed intensity (relative)
+    - min_absolute (absolute floor)
+    """
     h, w = img_gray.shape
     img = img_gray.astype(np.float64)
-    min_intensity = img[seed[0], seed[1]] * threshold_pct
+    
+    relative_thresh = img[seed[0], seed[1]] * threshold_pct
+    min_intensity = max(relative_thresh, float(min_absolute))
 
     mask = np.zeros((h, w), dtype=bool)
     visited = np.zeros((h, w), dtype=bool)
@@ -38,11 +45,32 @@ def region_grow(img_gray, seed, threshold_pct=0.10):
     return mask
 
 
+def find_bright_seed(img_gray, centroid, search_radius=50):
+    """
+    Find the brightest pixel near a centroid.
+    If the centroid itself is dim, search nearby for a better seed.
+    
+    Returns (y, x) of brightest pixel within search_radius, or
+    the original centroid if nothing brighter is found.
+    """
+    h, w = img_gray.shape
+    cy, cx = centroid
+    
+    y0 = max(0, cy - search_radius)
+    y1 = min(h, cy + search_radius)
+    x0 = max(0, cx - search_radius)
+    x1 = min(w, cx + search_radius)
+    
+    patch = img_gray[y0:y1, x0:x1]
+    if patch.size == 0:
+        return centroid
+    
+    local_idx = np.unravel_index(patch.argmax(), patch.shape)
+    return (y0 + local_idx[0], x0 + local_idx[1])
+
+
 def geodesic_max_distance(mask, seed):
-    """
-    Quick geodesic BFS to find the max distance from seed through mask.
-    Returns just the max distance value (not the full map).
-    """
+    """Quick geodesic BFS to find max distance from seed through mask."""
     h, w = mask.shape
 
     if not mask[seed[0], seed[1]]:
@@ -87,7 +115,8 @@ def nucleus_radius(nucleus_mask):
     return np.sqrt(area / np.pi)
 
 
-def trace_neuron(img, seed, channel=0, threshold_pct=0.10):
+def trace_neuron(img, seed, channel=0, threshold_pct=0.10, min_absolute=10,
+                 min_seed_intensity=15, seed_search_radius=50):
     """
     Trace a single neuron from a seed point.
 
@@ -101,14 +130,35 @@ def trace_neuron(img, seed, channel=0, threshold_pct=0.10):
         Channel to trace on (0=red, 1=green, 2=blue).
     threshold_pct : float
         Intensity threshold as fraction of seed value.
+    min_absolute : float
+        Absolute minimum intensity for region growing.
+        Region grow uses max(threshold_pct * seed_intensity, min_absolute).
+    min_seed_intensity : float
+        If the seed pixel is dimmer than this, search nearby for a
+        brighter pixel. If nothing above this value is found, return
+        empty mask (no neuron here).
+    seed_search_radius : int
+        How far to search for a brighter seed (pixels).
 
     Returns
     -------
-    dict with: mask, skeleton, seed
+    dict with: mask, skeleton, seed, actual_seed
     """
     gray = img[:, :, channel].astype(np.float64)
+    
+    original_seed = seed
+    
+    # Check seed intensity — find brighter pixel if needed
+    if gray[seed[0], seed[1]] < min_seed_intensity:
+        seed = find_bright_seed(gray, seed, seed_search_radius)
+        
+        # If the best nearby pixel is still too dim, no neuron here
+        if gray[seed[0], seed[1]] < min_seed_intensity:
+            empty = np.zeros(gray.shape, dtype=bool)
+            return {"mask": empty, "skeleton": empty, 
+                    "seed": original_seed, "actual_seed": seed}
 
-    mask = region_grow(gray, seed, threshold_pct)
+    mask = region_grow(gray, seed, threshold_pct, min_absolute)
     mask = morphology.remove_small_objects(mask, min_size=50)
     mask = morphology.remove_small_holes(mask, area_threshold=100)
 
@@ -117,22 +167,31 @@ def trace_neuron(img, seed, channel=0, threshold_pct=0.10):
     if seed_label > 0:
         mask = labeled == seed_label
     else:
-        return {"mask": mask, "skeleton": np.zeros_like(mask), "seed": seed}
+        empty = np.zeros(gray.shape, dtype=bool)
+        return {"mask": empty, "skeleton": empty, 
+                "seed": original_seed, "actual_seed": seed}
 
     skeleton = morphology.skeletonize(mask)
 
-    return {"mask": mask, "skeleton": skeleton, "seed": seed}
+    return {"mask": mask, "skeleton": skeleton, 
+            "seed": original_seed, "actual_seed": seed}
 
 
 def trace_all_neurons(img, centroids, nuclei_labeled, channel=0,
-                      threshold_pct=0.10, min_reach_ratio=2.0,
-                      min_mask_size=100000):
+                      threshold_pct=0.10, min_absolute=10,
+                      min_seed_intensity=15, seed_search_radius=50,
+                      min_reach_ratio=2.0, min_mask_size=100000,
+                      max_mask_fraction=0.15, border_margin=50,
+                      verbose=True):
     """
     Trace all neurons, filtering out non-neurons.
 
-    A detection is kept only if:
-    1. The tubulin mask is at least min_mask_size pixels
-    2. The tubulin mask extends at least min_reach_ratio × nucleus_radius
+    Filtering (in order):
+    1. Border exclusion: ignore centroids near image edges
+    2. Seed intensity: skip if no bright tubulin near the nucleus
+    3. Mask size floor: skip if mask < min_mask_size pixels
+    4. Mask size ceiling: skip if mask > max_mask_fraction of image
+    5. Geodesic reach: skip if tubulin doesn't extend far from nucleus
 
     Parameters
     ----------
@@ -145,31 +204,79 @@ def trace_all_neurons(img, centroids, nuclei_labeled, channel=0,
     channel : int
         Channel to trace on.
     threshold_pct : float
-        Intensity threshold as fraction of seed value.
+        Relative intensity threshold for region growing.
+    min_absolute : float
+        Absolute intensity floor for region growing.
+    min_seed_intensity : float
+        Minimum tubulin intensity at seed. If dimmer, searches nearby.
+        If nothing bright found, skips this neuron entirely.
+    seed_search_radius : int
+        How far from centroid to search for bright tubulin (px).
     min_reach_ratio : float
         Minimum geodesic reach as multiple of nucleus radius.
     min_mask_size : int
-        Minimum neuron mask area in pixels. Default 100000.
+        Minimum neuron mask area in pixels.
+    max_mask_fraction : float
+        Maximum mask area as fraction of total image area.
+    border_margin : int
+        Pixels to exclude around image edges. Centroids within this
+        margin are skipped. Region grow is also blocked from entering
+        this zone. Set to 0 to disable.
 
     Returns
     -------
-    traces : list of trace dicts (only neurons that passed filter)
-    kept_centroids : list of (y, x) centroids that passed filter
+    traces : list of trace dicts (only neurons that passed all filters)
+    kept_centroids : list of (y, x) centroids that passed
     """
     traces = []
     kept_centroids = []
+    h, w = img.shape[0], img.shape[1]
+    total_pixels = h * w
+    max_mask_size = int(total_pixels * max_mask_fraction)
+
+    # Create a working copy with borders zeroed out
+    if border_margin > 0:
+        img_work = img.copy()
+        img_work[:border_margin, :] = 0
+        img_work[-border_margin:, :] = 0
+        img_work[:, :border_margin] = 0
+        img_work[:, -border_margin:] = 0
+    else:
+        img_work = img
 
     for i, seed in enumerate(centroids):
-        trace = trace_neuron(img, seed, channel, threshold_pct)
+        # Filter 0: skip centroids near border
+        if border_margin > 0:
+            sy, sx = seed
+            if sy < border_margin or sy >= h - border_margin or \
+               sx < border_margin or sx >= w - border_margin:
+                if verbose: print(f"  Neuron {i+1}: FILTERED (near border)")
+                continue
+
+        trace = trace_neuron(img_work, seed, channel, threshold_pct,
+                             min_absolute, min_seed_intensity,
+                             seed_search_radius)
         mask_size = trace["mask"].sum()
 
-        # Filter 1: minimum mask size
-        if mask_size < min_mask_size:
-            print(f"  Neuron {i+1}: FILTERED (too small) — "
-                  f"mask={mask_size} px, min={min_mask_size} px")
+        # Filter 1: empty mask (seed too dim)
+        if mask_size == 0:
+            if verbose: print(f"  Neuron {i+1}: FILTERED (no tubulin signal at seed)")
             continue
 
-        # Get this nucleus mask and radius
+        # Filter 2: too small
+        if mask_size < min_mask_size:
+            if verbose: print(f"  Neuron {i+1}: FILTERED (too small) — "
+                  f"mask={mask_size} px, min={min_mask_size}")
+            continue
+
+        # Filter 3: too large (probably noise)
+        if mask_size > max_mask_size:
+            if verbose: print(f"  Neuron {i+1}: FILTERED (too large, likely noise) — "
+                  f"mask={mask_size} px, max={max_mask_size} "
+                  f"({max_mask_fraction*100:.0f}% of image)")
+            continue
+
+        # Get nucleus mask and radius
         label_at_seed = nuclei_labeled[seed[0], seed[1]]
         if label_at_seed > 0:
             nuc_mask = nuclei_labeled == label_at_seed
@@ -181,30 +288,26 @@ def trace_all_neurons(img, centroids, nuclei_labeled, channel=0,
         nuc_r = nucleus_radius(nuc_mask)
         min_reach = nuc_r * min_reach_ratio
 
-        # Filter 2: geodesic reach
-        if trace["mask"].any():
-            reach = geodesic_max_distance(trace["mask"], seed)
-        else:
-            reach = 0.0
+        # Filter 4: geodesic reach
+        actual_seed = trace.get("actual_seed", seed)
+        reach = geodesic_max_distance(trace["mask"], actual_seed)
 
         if reach >= min_reach:
             traces.append(trace)
             kept_centroids.append(seed)
-            print(f"  Neuron {i+1}: KEPT — mask={mask_size} px, "
+            if verbose: print(f"  Neuron {i+1}: KEPT — mask={mask_size} px, "
                   f"reach={reach:.0f} px, threshold={min_reach:.0f} px")
         else:
-            print(f"  Neuron {i+1}: FILTERED (low reach) — "
+            if verbose: print(f"  Neuron {i+1}: FILTERED (low reach) — "
                   f"mask={mask_size} px, reach={reach:.0f} px, "
                   f"threshold={min_reach:.0f} px")
 
-    print(f"\n  Kept {len(traces)}/{len(centroids)} neurons")
+    if verbose: print(f"\n  Kept {len(traces)}/{len(centroids)} neurons")
     return traces, kept_centroids
 
 
 def show_traces(img, traces, nuclei_labeled=None, save_path=None):
-    """
-    Visualise all traced neurons, optionally with nuclei overlay.
-    """
+    """Visualise all traced neurons, optionally with nuclei overlay."""
     gray = img[:, :, 0].astype(np.float64)
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))

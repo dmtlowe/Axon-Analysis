@@ -13,9 +13,6 @@ nucleus_detector.py
 Only one example where this fails. Mistaking multi 
 
 TO DO 
-- not cry 
-- touch grass
-THEN 
 - Produce batch version and pass over all exisiting datasets and evaluate performance - measure against human labels and plot differences for PAVNCD1_1-5-_8bit_panel
 
 HOW TF AM I GONNA DO MDI QUANTIFICATION ?!?!?!!!?!!?!?!? 
