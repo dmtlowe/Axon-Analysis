@@ -1,5 +1,6 @@
 """
-Nucleus detector - find nuclei from DAPI (blue channel).
+Nucleus detector - find nuclei from DAPI (blue channel),
+filtered by HRP colocalisation (green channel).
 
 Usage:
     python nucleus_detector.py image.tif
@@ -19,22 +20,32 @@ from skimage.segmentation import watershed
 from pathlib import Path
 
 
-def detect_nuclei(img, min_size=100, blur_sigma=5, min_peak_distance=50):
+def detect_nuclei(img, min_size=100, blur_sigma=5, min_peak_distance=50,
+                  require_hrp=True, hrp_channel=1, hrp_ring_width=30,
+                  hrp_threshold_factor=6.0):
     """
-    Detect nuclei from the blue channel of an RGB image.
+    Detect nuclei from the blue channel, optionally filtered by
+    HRP (green channel) colocalisation.
     
     Parameters
     ----------
     img : array
         RGB image.
     min_size : int
-        Minimum nucleus area in pixels (removes debris).
+        Minimum nucleus area in pixels.
     blur_sigma : float
-        Gaussian blur sigma. Smooths internal chromatin structure
-        so each nucleus becomes one blob.
+        Gaussian blur sigma for DAPI channel.
     min_peak_distance : int
-        Minimum distance between watershed seeds. Prevents splitting
-        one nucleus into multiple detections.
+        Minimum distance between watershed seeds.
+    require_hrp : bool
+        If True, only keep nuclei with green signal nearby.
+    hrp_channel : int
+        Which channel has HRP (default 1 = green).
+    hrp_ring_width : int
+        Width of ring around nucleus to check for HRP signal (pixels).
+    hrp_threshold_factor : float
+        Nucleus is kept if mean green in ring > factor × image background.
+        Background is estimated as median of the green channel.
     
     Returns
     -------
@@ -46,7 +57,7 @@ def detect_nuclei(img, min_size=100, blur_sigma=5, min_peak_distance=50):
     # Blur to merge internal structure
     blurred = filters.gaussian(blue, sigma=blur_sigma)
     
-    # Otsu threshold on blurred
+    # Otsu threshold
     thresh = filters.threshold_otsu(blurred)
     mask = blurred > thresh
     
@@ -54,7 +65,7 @@ def detect_nuclei(img, min_size=100, blur_sigma=5, min_peak_distance=50):
     mask = morphology.remove_small_objects(mask, min_size=min_size)
     mask = morphology.remove_small_holes(mask, area_threshold=500)
     
-    # Watershed with increased min_distance
+    # Watershed
     distance = ndimage.distance_transform_edt(mask)
     coords = peak_local_max(distance, min_distance=min_peak_distance, labels=mask)
     peak_mask = np.zeros(distance.shape, dtype=bool)
@@ -62,15 +73,38 @@ def detect_nuclei(img, min_size=100, blur_sigma=5, min_peak_distance=50):
     markers = measure.label(peak_mask)
     labeled = watershed(-distance, markers, mask=mask)
     
-    # Filter by min size
+    # Green channel for HRP check
+    if require_hrp:
+        green = img[:, :, hrp_channel].astype(np.float64)
+        bg_green = np.median(green)
+        hrp_min = bg_green * hrp_threshold_factor
+    
+    # Filter nuclei
     centroids = []
     filtered_label = np.zeros_like(labeled)
     new_id = 1
+    
     for region in measure.regionprops(labeled):
-        if region.area >= min_size:
-            filtered_label[labeled == region.label] = new_id
-            centroids.append((int(region.centroid[0]), int(region.centroid[1])))
-            new_id += 1
+        if region.area < min_size:
+            continue
+        
+        cy, cx = int(region.centroid[0]), int(region.centroid[1])
+        
+        if require_hrp:
+            # Check green intensity in a patch around centroid
+            h, w = green.shape
+            y0 = max(0, cy - hrp_ring_width)
+            y1 = min(h, cy + hrp_ring_width)
+            x0 = max(0, cx - hrp_ring_width)
+            x1 = min(w, cx + hrp_ring_width)
+            mean_green = green[y0:y1, x0:x1].mean()
+            
+            if mean_green < hrp_min:
+                continue
+        
+        filtered_label[labeled == region.label] = new_id
+        centroids.append((cy, cx))
+        new_id += 1
     
     return centroids, filtered_label
 
